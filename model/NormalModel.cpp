@@ -1,87 +1,129 @@
 #include "NormalModel.hpp"
 
-NormalModel::NormalModel(Shared* const sh, const uint64_t cmSize) : 
-  shared(sh), cm(sh, cmSize, nCM, 64),
-  smOrder0Slow(sh, 1, 255, 1023, StateMap::Generic), 
-  smOrder1Slow(sh, 1, 255 * 256, 1023, StateMap::Generic),
-  smOrder1Fast(sh, 1, 255 * 256, 64, StateMap::Generic) // 64->16 is also ok
+NormalModel::NormalModel(Shared* const sh, const uint64_t cmSize) :
+  shared(sh),
+  width(sh->width * sh->fileFormat),
+  cm(sh, cmSize),
+  smOrder0(sh, 255 * 4, 4),
+  smOrder1(sh, 255 * 256 * 4, 32),
+  largeMap(sh, nLM, 15 + sh->level) //16..27
 {
   assert(isPowerOf2(cmSize));
 }
 
-void NormalModel::reset() {
-  memset(&shared->State.NormalModel.cxt[0], 0, sizeof(shared->State.NormalModel.cxt));
-}
-
-void NormalModel::updateHashes() {
-  INJECT_SHARED_c1
-  INJECT_SHARED_blockType
-  BlockType normalizedBlockType = blockType;
-  /* todo: let blocktype represent simply the blocktype without any transformation used:
-      blockType == BlockType::AUDIO_LE = BlockType::AUDIO
-      blockType == BlockType::TEXT_EOL = BlockType::TEXT
-  */
-  if (isTEXT(blockType))
-    normalizedBlockType = BlockType::DEFAULT;
-  else if (blockType == BlockType::AUDIO_LE)
-    normalizedBlockType = BlockType::AUDIO;
-  const uint64_t blocktype_c1 = normalizedBlockType << 8 | c1;
-  uint64_t* cxt = shared->State.NormalModel.cxt;
-  for( uint64_t i = 14; i > 0; --i ) {
-    cxt[i] = (cxt[i - 1] + blocktype_c1 + i) * PHI64;
-  }
-}
-
 void NormalModel::mix(Mixer &m) {
   INJECT_SHARED_bpos
+  INJECT_SHARED_c1
+  INJECT_SHARED_c4
+  INJECT_SHARED_pos
+  INJECT_SHARED_buf
   if( bpos == 0 ) {
-    updateHashes();
-    uint64_t* cxt = shared->State.NormalModel.cxt;
-    const uint8_t RH = CM_USE_RUN_STATS | CM_USE_BYTE_HISTORY;
-    for(uint64_t i = 1; i <= 6; ++i ) {
-      cm.set(RH, cxt[i]);
+
+    col = pos & (shared->fileFormat-1);
+
+    uint64_t i = 0;
+    if (shared->fileFormat == 2) {
+      if (col == 0) {
+        WW = W;
+        W = c4 & 0x0000ffff;
+        N = buf(1 * width) << 8 | buf(1 * width - 1);
+        NN = buf(2 * width) << 8 | buf(2 * width - 1);
+        ctx1 = W + WW;
+        ctx2 = N + NN;
+        ctx3 = W + N;
+      }
+      const uint32_t lastChunk0 = col == 0 ? 0 : c1;
+      const uint32_t lastChunk1 = col == 0 ? W >> 8 : W;
+      const uint32_t lastChunk2 = col == 0 ? WW >> 8 : WW;
+      cm.set(i, hash(i, lastChunk0, col));
+      i++;
+      cm.set(i, hash(i, lastChunk0, lastChunk1 , col));
+      i++;
+      cm.set(i, hash(i, lastChunk0, lastChunk1, lastChunk2, col));
+      i++;
+      cm.set(i, hash(i, N, W, lastChunk0, col));
     }
-    cm.set(RH, cxt[8]); 
-    cm.set(RH, cxt[11]);
-    cm.set(RH, cxt[14]);
+    else {
+      if (col == 0) {
+        WW = W;
+        W = c4;
+        N = buf(1 * width) << 24 | buf(1 * width - 1) << 16 | buf(1 * width - 2) << 8 | buf(1 * width - 3);
+        NN = buf(2 * width) << 24 | buf(2 * width - 1) << 16 | buf(2 * width - 2) << 8 | buf(2 * width - 3);
+        float Wf = bintofloat(W);
+        float WWf = bintofloat(WW);
+        float Nf = bintofloat(N);
+        float NNf = bintofloat(NN);
+        ctx1 = floattobin(Wf + WWf);
+        ctx2 = floattobin(Nf + NNf);
+        ctx3 = floattobin(Wf + Nf);
+      }
+      const uint32_t lastChunk0 = c4 & (0x00ffffff >> ((3 - col) * 8));
+      const uint32_t lastChunk1 = W >> ((3 - col) * 8);
+      const uint32_t lastChunk2 = WW >> ((3 - col) * 8);
+      cm.set(i, hash(i, lastChunk0, col));
+      i++;
+      cm.set(i, hash(i, lastChunk0, lastChunk1, col));
+      i++;
+      cm.set(i, hash(i, lastChunk0, lastChunk1, lastChunk2, col));
+      i++;
+      cm.set(i, hash(i, N, W, lastChunk0, col));
+    }
   }
   cm.mix(m);
-  INJECT_SHARED_c0
-  INJECT_SHARED_c1
-  m.add((stretch(smOrder0Slow.p1(c0 - 1))) >> 2U); //order 0
-  m.add((stretch(smOrder1Fast.p1((c0 - 1) << 8U | c1))) >> 2U); //order 1
-  m.add((stretch(smOrder1Slow.p1((c0 - 1) << 8U | c1))) >> 2U); //order 1
 
-  const int order = max(0, cm.order - (nCM - 7)); //0-7
-  assert(0 <= order && order <= 7);
-  m.set(order << 3U | bpos, 64);
-  shared->State.NormalModel.order = order;
+  INJECT_SHARED_y
+  bitStream <<= 1;
+  bitStream |= y;
+
+  int bitPos = col * 8 + bpos; //0..15; 0..31
+  if (bitPos == 0)
+    bitStream = 1;
+
+  int prefixLength;
+
+  prefixLength = (shared->fileFormat * 8 - 1 - bitPos);
+  prefixLength = max(prefixLength - 3, 0); //3 bits lookahead
+
+  //note: we deliberately allow hash collisions
+  largeMap.set(hash(bitStream, ctx1 >> prefixLength));
+  largeMap.set(hash(bitStream, ctx2 >> prefixLength));
+  largeMap.set(hash(bitStream, ctx3 >> prefixLength));
+
+  uint64_t before1 = W >> prefixLength;
+  uint64_t before2 = WW >> prefixLength;
+  uint64_t above1 = N >> prefixLength;
+  uint64_t above2 = NN >> prefixLength;
+
+  largeMap.set(hash(bitStream, before1, above1));
+  largeMap.set(hash(bitStream, before1, before2, above1, above2));
+
+  largeMap.mix(m);
+
+  INJECT_SHARED_c0
+  int p1, st;
+  p1 = smOrder0.p1((c0 - 1) << 2 | col);
+  m.add((p1 - 2048) >> 2);
+  st = stretch(p1);
+  m.add(st >> 1);
+
+  p1 = smOrder1.p1((c0 - 1) << 10 | c1 << 2 | col);
+  m.add((p1 - 2048) >> 2);
+  st = stretch(p1);
+  m.add(st >> 1);
+
+  uint32_t misses = shared->State.misses << ((8 - bpos) & 7); //byte-aligned
+  misses = (misses & 0xffffff00) | (misses & 0xff) >> ((8 - bpos) & 7);
+
+  uint32_t misses3 =
+    ((misses & 0x1) != 0) |
+    ((misses & 0xfe) != 0) << 1 |
+    ((misses & 0xff00) != 0) << 2;
+   
+  m.set(col << 3 | bpos, 4 * 8);
+  m.set(((misses3) << 2 | col) * 255 + (c0 - 1), 8 * 4 * 255);
+  m.set((misses != 0) << 10 | c1 << 2 | col, 2 * 256 * 4);
+  m.set(cm.confidence, 3 * 3 * 3 * 3);
+  m.set(largeMap.confidence, 3 * 3 * 3 * 3 * 3);
+
 }
 
-void NormalModel::mixPost(Mixer &m) {
-  INJECT_SHARED_c4
-  uint32_t c2 = (c4 >> 8U) & 0xffU;
-  uint32_t c3 = (c4 >> 16U) & 0xffU;
-  uint32_t c;
-
-  INJECT_SHARED_c0
-  INJECT_SHARED_c1
-  INJECT_SHARED_bpos
-  INJECT_SHARED_blockType
-  m.set((c1 | static_cast<int>(bpos > 5) << 8U | static_cast<int>(((c0 & ((1U << bpos) - 1)) == 0) || (c0 == ((2 << bpos) - 1))) << 9U), 1024);
-  m.set(c0, 256);
-  uint32_t bt = blockType == BlockType::DEFAULT ? 0 : isTEXT(blockType) ? 1 : blockType == BlockType::EXE || blockType == BlockType::DEC_ALPHA ? 2 : 3;
-  m.set(shared->State.NormalModel.order | ((c1 >> 6U) & 3U) << 3U | static_cast<int>(bpos == 0) << 5U | static_cast<int>(c1 == c2) << 6U | bt << 7U, 512);
-  m.set(c2, 256);
-  m.set(c3, 256);
-  if( bpos != 0 ) {
-    c = c0 << (8 - bpos);
-    if( bpos == 1 ) {
-      c |= c3 >> 1U;
-    }
-    c = min(bpos, 5) << 8U | c1 >> 5U | (c2 >> 5U) << 3U | (c & 192U);
-  } else {
-    c = c3 >> 7U | (c4 >> 31U) << 1U | (c2 >> 6U) << 2U | (c1 & 240U);
-  }
-  m.set(c, 1536);
-}

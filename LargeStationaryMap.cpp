@@ -1,17 +1,15 @@
 #include "LargeStationaryMap.hpp"
 
-LargeStationaryMap::LargeStationaryMap(const Shared* const sh, const int contexts, const int hashBits, const int scale, const int rate) :
+LargeStationaryMap::LargeStationaryMap(const Shared* const sh, const int contexts, const int hashBits, const int rate) :
   shared(sh),
-  rnd(),
   data((UINT64_C(1) << hashBits)),
   hashBits(hashBits),
-  scale(scale),
   rate(rate),
   numContexts(contexts),
   currentContextIndex(0),
   contextHashes(contexts) {
   assert(hashBits > 0);
-  assert(hashBits <= 24); // 24 is just a reasonable limit for memory use 
+  assert(hashBits <= 28); // 28 is just a reasonable limit for memory use 
   assert(9 <= rate && rate <= 16); // 9 is just a reasonable lower bound, 16 is a hard bound
   reset();
 }
@@ -20,10 +18,6 @@ void LargeStationaryMap::set(const uint64_t contextHash) {
   assert(currentContextIndex < numContexts);
   contextHashes[currentContextIndex] = contextHash;
   currentContextIndex++;
-}
-
-void LargeStationaryMap::setscale(const int scale) {
-  this->scale = scale;
 }
 
 void LargeStationaryMap::reset() {
@@ -37,12 +31,9 @@ void LargeStationaryMap::update() {
   while (currentContextIndex > 0) {
     currentContextIndex--;
     const uint64_t contextHash = contextHashes[currentContextIndex];
-    if (contextHash == 0) {
-      continue; // skipped context
-    }
     uint32_t hashkey = finalize64(contextHash, hashBits);
     uint16_t checksum = checksum16(contextHash, hashBits);
-    uint32_t *cp = &data[hashkey].find(checksum, &rnd)->value;
+    uint32_t *cp = &data[hashkey].find(checksum)->value;
     update(cp);
   }
 }
@@ -65,7 +56,9 @@ void LargeStationaryMap::update(uint32_t *cp) {
 }
 
 void LargeStationaryMap::mix(Mixer &m) {
-  shared->GetUpdateBroadcaster()->subscribe(this);
+
+  confidence = 0;
+
   uint32_t n0, n1, value, sum;
   int p1, st, bitIsUncertain;
   assert(currentContextIndex == numContexts);
@@ -73,35 +66,24 @@ void LargeStationaryMap::mix(Mixer &m) {
     uint64_t contextHash = contextHashes[i];
     uint32_t hashkey = finalize64(contextHash, hashBits);
     uint16_t checksum = checksum16(contextHash, hashBits);
-    value = data[hashkey].find(checksum, &rnd)->value;
+    value = data[hashkey].find(checksum)->value;
     n0 = value >> 16;
     n1 = value & 0xffff;
 
+    confidence *= 3;
     sum = n0 + n1;
     if (sum == 0) {
-      m.add(0);
       m.add(0);
       m.add(0);
     }
     else {
       p1 = ((n1 * 2 + 1) << 12) / (sum * 2 + 2);
-      st = (stretch(p1) * scale) >> 8;
-      m.add(st);
-      m.add(((p1 - 2048) * scale) >> 9);
+      st = stretch(p1);
+      m.add(st>>1);
+      m.add((p1 - 2048) >> 2);
       bitIsUncertain = int(sum <= 1 || (n0 != 0 && n1 != 0));
-      m.add((bitIsUncertain - 1) & st); // when both counts are nonzero add(0) otherwise add(st)
-      //p0 = 4095 - p1;
-      //m.add((((p1 & (-!n0)) - (p0 & (-!n1))) * scale) >> 10);
+      confidence += 1 + bitIsUncertain;
     }
   }
 }
 
-void LargeStationaryMap::subscribe() {
-  shared->GetUpdateBroadcaster()->subscribe(this);
-}
-
-void LargeStationaryMap::skip() {
-  assert(currentContextIndex < numContexts);
-  contextHashes[currentContextIndex] = 0; // mark for skipping
-  currentContextIndex++;
-}

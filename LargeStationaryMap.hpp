@@ -1,12 +1,10 @@
 #ifndef PAQ8PX_LARGESTATIONARYMAP_HPP
 #define PAQ8PX_LARGESTATIONARYMAP_HPP
 
-#include "IPredictor.hpp"
 #include "Bucket16.hpp"
 #include "Hash.hpp"
 #include "Mixer.hpp"
 #include "Stretch.hpp"
-#include "UpdateBroadcaster.hpp"
 
 /**
  * Map for modelling contexts of (nearly-)stationary data.
@@ -14,16 +12,15 @@
  *
  */
 
-class LargeStationaryMap : IPredictor {
+class LargeStationaryMap  {
 public:
-    static constexpr int MIXERINPUTS = 3;
+    static constexpr int MIXERINPUTS = 2;
 
 private:
     const Shared * const shared;
-    Random rnd;
-    Array<Bucket16<HashElementForStationaryMap, 7>> data;
+    Array<Bucket16<HashElementForStationaryMap>> data;
     const uint32_t hashBits;
-    int scale, rate;
+    int rate;
 
     const uint32_t numContexts; /**< Maximum supported contexts */
     uint32_t currentContextIndex; /**< Number of context indexes present in cxt array (0..numContexts-1) */
@@ -50,20 +47,19 @@ public:
      * @param scale
      * @param rate use 16 near-stationary modelling (default), smaller values may be used for tuning adaptivity
      */
-    LargeStationaryMap(const Shared* const sh, const int contexts, const int hashBits, const int scale = 64, const int rate = 16);
+    LargeStationaryMap(const Shared* const sh, const int contexts, const int hashBits, const int rate = 16);
+
+    uint32_t confidence = 0; // is set after mix()
 
     /**
      * ctx must be a hash
      * @param ctx
      */
     void set(const uint64_t contextHash);
-    void setscale(const int scale);
     void reset();
-    void update() override;
+    void update();
     void update(uint32_t *cp);
     void mix(Mixer &m);
-    void subscribe();
-    void skip();
 
 };
 
