@@ -35,3 +35,9 @@ paq8px-lite-t2 for multichannel image and telemetry data (gdcc2021 test2) by Zol
 - Removed RunMap (StateMap) from ContextMap2
 - Using the same fixed probabilities in StateMap1 for all the contexts
 - Tuned parameters for "Global Data Compression Competition 2021" Test-set 2 "Quantitative Data (images and telemetry)"
+
+
+paq8px-lite-t2-fix1 by Zoltán Gotthardt
+2021.12.03
+- Fixed reading filesize from archive greater then 4gb. 
+- Renamed utils.hpp to Utils.hpp to fix build on some linux systems.
